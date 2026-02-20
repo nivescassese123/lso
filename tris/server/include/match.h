@@ -7,35 +7,33 @@
 #define MAX_MATCHES 128
 
 typedef enum {
-    MATCH_WAITING  = 0,   /* creata, in attesa di un avversario    */
-    MATCH_PENDING  = 1,   /* richiesta di join pendente            */
-    MATCH_PLAYING  = 2,   /* partita in corso                      */
-    MATCH_FINISHED = 3,   /* terminata (slot liberato → id=0)      */
-    MATCH_REMATCH  = 4    /* fine partita, in attesa di rematch    */
+    MATCH_WAITING  = 0,
+    MATCH_PENDING  = 1,
+    MATCH_PLAYING  = 2,
+    MATCH_FINISHED = 3,
+    MATCH_REMATCH  = 4    /* fine partita, slot ancora vivo per tracciare risultato */
 } match_status_t;
 
 typedef struct {
     int            id;
     match_status_t status;
 
-    int owner_fd;      /* creatore (X)                   */
-    int joiner_fd;     /* avversario (O)                 */
-    int pending_fd;    /* richiesta join in attesa       */
+    int owner_fd;
+    int joiner_fd;
+    int pending_fd;
 
-    char board[3][3];  /* 'X', 'O', ' '                 */
-    int  turn;         /* 0=X(owner), 1=O(joiner)        */
+    char board[3][3];
+    int  turn;         /* 0=X(owner), 1=O(joiner) */
 
-    /* ---- REMATCH ---- */
     /*
-     * Quando una partita finisce entra in stato MATCH_REMATCH.
-     * Chi vuole rigiocare invia REMATCH: diventa il nuovo owner
-     * della prossima partita e attende che l'avversario accetti.
-     *
-     * rematch_requester_fd : chi ha chiesto per primo il rematch (-1 se nessuno)
-     * rematch_other_fd     : l'altro giocatore (quello che deve rispondere)
+     * Risultato — valorizzati quando si entra in MATCH_REMATCH.
+     * winner_fd = fd vincitore  (-1 se pareggio)
+     * loser_fd  = fd perdente   (-1 se pareggio)
+     * draw      = 1 se pareggio
      */
-    int rematch_requester_fd;
-    int rematch_other_fd;
+    int winner_fd;
+    int loser_fd;
+    int draw;
 } match_t;
 
 typedef struct {
@@ -44,20 +42,14 @@ typedef struct {
     match_t         matches[MAX_MATCHES];
 } match_store_t;
 
-/* ------------------------------------------------------------------ */
-/*  Init                                                                */
-/* ------------------------------------------------------------------ */
+/* Init */
 void matches_init(match_store_t *ms);
 
-/* ------------------------------------------------------------------ */
-/*  Lobby                                                               */
-/* ------------------------------------------------------------------ */
+/* Lobby */
 int  matches_create(match_store_t *ms, int owner_fd);
 void matches_list(match_store_t *ms, server_state_t *st, char *out, int outsz);
 
-/* ------------------------------------------------------------------ */
-/*  JOIN flow                                                           */
-/* ------------------------------------------------------------------ */
+/* JOIN flow */
 int matches_request_join(match_store_t *ms, int match_id, int joiner_fd,
                          int *owner_fd_out);
 int matches_accept(match_store_t *ms, int match_id, int owner_fd,
@@ -65,20 +57,7 @@ int matches_accept(match_store_t *ms, int match_id, int owner_fd,
 int matches_reject(match_store_t *ms, int match_id, int owner_fd,
                    int *rejected_fd_out);
 
-/* ------------------------------------------------------------------ */
-/*  Gioco                                                               */
-/* ------------------------------------------------------------------ */
-/*
- * matches_move → ritorna:
- *   0  mossa ok, partita continua
- *   1  win
- *   2  draw
- *  -1  match non trovato
- *  -2  match non in PLAYING
- *  -3  non sei un giocatore
- *  -4  non è il tuo turno
- *  -5  mossa non valida
- */
+/* Gioco */
 int matches_move(match_store_t *ms, server_state_t *st,
                  int match_id, int player_fd, int r, int c,
                  int *opponent_fd_out,
@@ -87,53 +66,38 @@ int matches_move(match_store_t *ms, server_state_t *st,
 
 int matches_board(match_store_t *ms, int match_id, char *out, int outsz);
 
-/*
- * matches_resign → ritorna:
- *   0  ok
- *  -1  match non trovato
- *  -2  match non in PLAYING
- *  -3  non sei un giocatore
- *  -4  nessun avversario
- */
 int matches_resign(match_store_t *ms, server_state_t *st,
                    int match_id, int player_fd,
                    int *opponent_fd_out,
                    char *board_out, int board_outsz,
                    char *winner_name_out, int winner_name_sz);
 
-/* ------------------------------------------------------------------ */
-/*  REMATCH                                                             */
-/* ------------------------------------------------------------------ */
 /*
- * matches_rematch → chiamato quando un giocatore digita REMATCH.
+ * REMATCH — logica conforme alla traccia:
+ *
+ *  Il vincitore (o chiunque in caso di pareggio) fa REMATCH:
+ *  → viene creata una NUOVA partita in WAITING con lui come owner (X)
+ *  → broadcast a tutti: chiunque può fare JOIN
+ *  → il vecchio slot MATCH_REMATCH viene liberato
+ *
+ *  Il perdente non può fare REMATCH.
  *
  * Ritorna:
- *   0  ok, richiesta registrata — aspetta l'avversario
- *         (*other_fd_out = fd dell'avversario da notificare)
- *   1  entrambi hanno accettato — nuova partita creata
- *         (*new_match_id_out = id della nuova partita)
- *         (*new_owner_fd_out = chi diventa X, cioè chi ha chiesto per primo)
- *         (*new_joiner_fd_out = l'altro)
- *  -1  match non trovato / non in stato REMATCH
- *  -2  non sei uno dei due giocatori
- *  -3  hai già chiesto il rematch
+ *   new_id >= 1  : nuova partita creata, ritorna il nuovo match_id
+ *   -1           : match non trovato / non in MATCH_REMATCH
+ *   -2           : non sei un giocatore di questa partita
+ *   -3           : sei il perdente, non puoi fare rematch
+ *   -4           : nessuno slot libero
  */
-int matches_rematch(match_store_t *ms, int match_id, int player_fd,
-                    int *other_fd_out,
-                    int *new_match_id_out,
-                    int *new_owner_fd_out,
-                    int *new_joiner_fd_out);
+int matches_rematch(match_store_t *ms, int match_id, int player_fd);
 
 /*
- * Ritorna il match_id dell'eventuale partita REMATCH in cui
- * player_fd è coinvolto (-1 se non ce n'è).
- * Usato da main.c per trovare il match dopo fine partita.
+ * Cerca la partita in stato MATCH_REMATCH in cui player_fd è coinvolto.
+ * Ritorna il match_id oppure -1.
  */
 int matches_find_rematch(match_store_t *ms, int player_fd);
 
-/* ------------------------------------------------------------------ */
-/*  Disconnect                                                          */
-/* ------------------------------------------------------------------ */
+/* Disconnect */
 void matches_on_disconnect(match_store_t *ms, server_state_t *st, int fd);
 
-#endif 
+#endif /* MATCH_H */

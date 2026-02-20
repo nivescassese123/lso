@@ -3,10 +3,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ------------------------------------------------------------------ */
-/*  Helpers interni (chiamare solo con mutex già acquisito)             */
-/* ------------------------------------------------------------------ */
-
 static client_t *find_client(server_state_t *st, int fd) {
     for (int i = 0; i < MAX_CLIENTS; i++)
         if (st->clients[i].fd == fd && st->clients[i].fd != 0)
@@ -21,20 +17,12 @@ static client_t *find_free_slot(server_state_t *st) {
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Inizializzazione                                                    */
-/* ------------------------------------------------------------------ */
-
 void state_init(server_state_t *st) {
     pthread_mutex_init(&st->mtx, NULL);
     memset(st->clients, 0, sizeof(st->clients));
     for (int i = 0; i < MAX_CLIENTS; i++)
         st->clients[i].playing_match_id = -1;
 }
-
-/* ------------------------------------------------------------------ */
-/*  Aggiunta / rimozione client                                         */
-/* ------------------------------------------------------------------ */
 
 void state_add_client(server_state_t *st, int fd) {
     pthread_mutex_lock(&st->mtx);
@@ -55,16 +43,11 @@ void state_remove_client(server_state_t *st, int fd) {
     pthread_mutex_unlock(&st->mtx);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Login                                                               */
-/* ------------------------------------------------------------------ */
-
 int state_login(server_state_t *st, int fd, const char *name) {
     if (!name || name[0] == '\0' || strlen(name) >= MAX_NAME)
         return -2;
 
     pthread_mutex_lock(&st->mtx);
-
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (st->clients[i].fd != 0 &&
             st->clients[i].logged_in &&
@@ -73,21 +56,15 @@ int state_login(server_state_t *st, int fd, const char *name) {
             return -1;
         }
     }
-
     client_t *c = find_client(st, fd);
     if (!c) { pthread_mutex_unlock(&st->mtx); return -3; }
 
     strncpy(c->name, name, MAX_NAME - 1);
     c->name[MAX_NAME - 1] = '\0';
     c->logged_in = 1;
-
     pthread_mutex_unlock(&st->mtx);
     return 0;
 }
-
-/* ------------------------------------------------------------------ */
-/*  Lettura nome                                                        */
-/* ------------------------------------------------------------------ */
 
 const char *state_get_name(server_state_t *st, int fd) {
     pthread_mutex_lock(&st->mtx);
@@ -110,10 +87,6 @@ int state_get_name_copy(server_state_t *st, int fd, char *buf, int bufsz) {
     return found;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Lista utenti                                                        */
-/* ------------------------------------------------------------------ */
-
 void state_users(server_state_t *st, char *out, int outsz) {
     pthread_mutex_lock(&st->mtx);
     char *p    = out;
@@ -129,10 +102,6 @@ void state_users(server_state_t *st, char *out, int outsz) {
     if (!found) snprintf(out, outsz, "NO_USERS\n");
     pthread_mutex_unlock(&st->mtx);
 }
-
-/* ------------------------------------------------------------------ */
-/*  Gestione partita in corso                                           */
-/* ------------------------------------------------------------------ */
 
 int state_get_playing_match(server_state_t *st, int fd) {
     pthread_mutex_lock(&st->mtx);
@@ -154,10 +123,6 @@ int state_set_playing_match(server_state_t *st, int fd, int mid) {
 int state_clear_playing_match(server_state_t *st, int fd) {
     return state_set_playing_match(st, fd, -1);
 }
-
-/* ------------------------------------------------------------------ */
-/*  Broadcast                                                           */
-/* ------------------------------------------------------------------ */
 
 void state_broadcast(server_state_t *st, const char *msg, int exclude_fd) {
     int fds[MAX_CLIENTS];

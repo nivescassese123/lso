@@ -8,13 +8,8 @@
 
 #define MAX_LINE 1024
 
-/*
- * Thread ricevitore: legge CONTINUAMENTE dal socket e stampa
- * tutto quello che arriva. Questo permette di ricevere eventi
- * asincroni (broadcast, mosse avversario, rematch, ecc.)
- * mentre l'utente sta digitando sul terminale.
- */
-static volatile int g_running = 1;  /* flag per terminare il thread */
+
+static volatile int g_running = 1;  
 
 static void *receiver_thread(void *arg) {
     int fd = *(int *)arg;
@@ -23,7 +18,7 @@ static void *receiver_thread(void *arg) {
     while (g_running) {
         ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
         if (n <= 0) {
-            /* Connessione chiusa dal server */
+            
             if (g_running) {
                 printf("\n[SERVER] Connessione chiusa.\n");
                 g_running = 0;
@@ -32,8 +27,8 @@ static void *receiver_thread(void *arg) {
         }
         buf[n] = '\0';
 
-        /* Stampa il messaggio ricevuto, poi ripristina il prompt */
-        printf("\r%s> ", buf);   /* \r sovrascrive la riga del prompt */
+        
+        printf("\r%s> ", buf);   
         fflush(stdout);
     }
     return NULL;
@@ -67,9 +62,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Avvia il thread ricevitore */
+    
     pthread_t tid;
-    int fd_copy = fd;   /* copia stabile per il thread */
+    int fd_copy = fd;   
     if (pthread_create(&tid, NULL, receiver_thread, &fd_copy) != 0) {
         perror("pthread_create");
         close(fd);
@@ -77,33 +72,32 @@ int main(int argc, char *argv[]) {
     }
     pthread_detach(tid);
 
-    /* Loop principale: legge da stdin e manda al server */
+   
     char buf[MAX_LINE];
     while (g_running) {
         printf("> ");
         fflush(stdout);
 
         if (!fgets(buf, sizeof(buf), stdin)) {
-            /* EOF (es. Ctrl+D) */
+            
             break;
         }
 
-        if (!g_running) break;  /* server si è disconnesso nel frattempo */
+        if (!g_running) break;  
 
-        /* Invia la riga al server (include già il '\n') */
+        
         size_t len = strlen(buf);
         if (send(fd, buf, len, 0) < 0) {
             perror("send");
             break;
         }
 
-        /* Controlla QUIT localmente per uscire pulito */
         char trimmed[MAX_LINE];
         strncpy(trimmed, buf, sizeof(trimmed) - 1);
         trimmed[sizeof(trimmed) - 1] = '\0';
         trimmed[strcspn(trimmed, "\r\n")] = '\0';
         if (strcmp(trimmed, "QUIT") == 0 || strcmp(trimmed, "quit") == 0) {
-            /* Aspetta un attimo la risposta BYE dal server, poi esci */
+           
             usleep(200000);
             break;
         }

@@ -18,18 +18,17 @@ server_state_t g_state;
 match_store_t  g_matches;
 
 /* ------------------------------------------------------------------ */
-/*  Helper: invia board iniziale e messaggi di avvio a entrambi        */
+/*  Helper: notifica inizio partita a entrambi i giocatori + board     */
 /* ------------------------------------------------------------------ */
-static void start_match_notify(int match_id,
-                                int owner_fd, const char *owner_name,
+static void notify_match_start(int match_id,
+                                int owner_fd,  const char *owner_name,
                                 int joiner_fd, const char *joiner_name,
-                                const char *ok_fmt_x, const char *ok_fmt_o) {
+                                const char *fmt_x, const char *fmt_o) {
     char msg[256];
-
-    snprintf(msg, sizeof(msg), ok_fmt_x, match_id, joiner_name);
+    snprintf(msg, sizeof(msg), fmt_x, match_id, joiner_name);
     send_all(owner_fd, msg);
 
-    snprintf(msg, sizeof(msg), ok_fmt_o, match_id, owner_name);
+    snprintf(msg, sizeof(msg), fmt_o, match_id, owner_name);
     send_all(joiner_fd, msg);
 
     char bbuf[512];
@@ -58,7 +57,6 @@ static void *client_handler(void *arg) {
         if (r == 0) break;
         if (r < 0) { perror("recv_line"); break; }
 
-        /* Strip \r\n prima di qualsiasi confronto */
         line[strcspn(line, "\r\n")] = '\0';
 
         char *p = line;
@@ -70,7 +68,6 @@ static void *client_handler(void *arg) {
             break;
         }
 
-        /* Aggiorna nome locale ad ogni iterazione (thread-safe) */
         me[0] = '\0';
         int logged_in = state_get_name_copy(&g_state, client_fd, me, sizeof(me));
 
@@ -112,7 +109,6 @@ static void *client_handler(void *arg) {
                 send_all(client_fd, PROTO_ERR_MATCHES_FULL);
             } else {
                 proto_sendf(client_fd, PROTO_OK_MATCH_CREATED, id);
-                /* Broadcast: nuova partita disponibile */
                 char bcast[128];
                 snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_AVAILABLE, id, me);
                 state_broadcast(&g_state, bcast, client_fd);
@@ -163,7 +159,7 @@ static void *client_handler(void *arg) {
                 char joiner_name[MAX_NAME] = "??";
                 state_get_name_copy(&g_state, joiner_fd, joiner_name, sizeof(joiner_name));
 
-                start_match_notify(id,
+                notify_match_start(id,
                     client_fd, me,
                     joiner_fd, joiner_name,
                     PROTO_OK_MATCH_STARTED_X,
@@ -228,33 +224,43 @@ static void *client_handler(void *arg) {
                     proto_sendf(opp_fd, PROTO_EVENT_OPPONENT_MOVED, rr, cc);
                     send_all(opp_fd, boardbuf);
                 }
-            } else if (mrc == 1 || mrc == 2) {
-                /* Fine partita: win o draw */
+
+            } else if (mrc == 1) {
+                /* Vittoria */
                 state_clear_playing_match(&g_state, client_fd);
                 if (opp_fd != -1) state_clear_playing_match(&g_state, opp_fd);
 
-                if (mrc == 1) {
-                    send_all(client_fd, PROTO_EVENT_YOU_WIN);
-                    proto_sendf(client_fd, PROTO_EVENT_WINNER, winner);
-                    send_all(client_fd, boardbuf);
-                    if (opp_fd != -1) {
-                        send_all(opp_fd, PROTO_EVENT_YOU_LOSE);
-                        proto_sendf(opp_fd, PROTO_EVENT_WINNER, winner);
-                        send_all(opp_fd, boardbuf);
-                    }
-                } else {
-                    send_all(client_fd, PROTO_EVENT_DRAW);
-                    send_all(client_fd, boardbuf);
-                    if (opp_fd != -1) {
-                        send_all(opp_fd, PROTO_EVENT_DRAW);
-                        send_all(opp_fd, boardbuf);
-                    }
-                }
-                /* Invita al rematch */
-                send_all(client_fd, PROTO_EVENT_GAME_OVER);
-                if (opp_fd != -1) send_all(opp_fd, PROTO_EVENT_GAME_OVER);
+                send_all(client_fd, PROTO_EVENT_YOU_WIN);
+                proto_sendf(client_fd, PROTO_EVENT_WINNER, winner);
+                send_all(client_fd, boardbuf);
+                send_all(client_fd, PROTO_EVENT_GAME_OVER_WIN);
 
-                /* Broadcast partita terminata */
+                if (opp_fd != -1) {
+                    send_all(opp_fd, PROTO_EVENT_YOU_LOSE);
+                    proto_sendf(opp_fd, PROTO_EVENT_WINNER, winner);
+                    send_all(opp_fd, boardbuf);
+                    send_all(opp_fd, PROTO_EVENT_GAME_OVER_LOSE);
+                }
+
+                char bcast[64];
+                snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_FINISHED, mid);
+                state_broadcast(&g_state, bcast, -1);
+
+            } else if (mrc == 2) {
+                /* Pareggio */
+                state_clear_playing_match(&g_state, client_fd);
+                if (opp_fd != -1) state_clear_playing_match(&g_state, opp_fd);
+
+                send_all(client_fd, PROTO_EVENT_DRAW);
+                send_all(client_fd, boardbuf);
+                send_all(client_fd, PROTO_EVENT_GAME_OVER_DRAW);
+
+                if (opp_fd != -1) {
+                    send_all(opp_fd, PROTO_EVENT_DRAW);
+                    send_all(opp_fd, boardbuf);
+                    send_all(opp_fd, PROTO_EVENT_GAME_OVER_DRAW);
+                }
+
                 char bcast[64];
                 snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_FINISHED, mid);
                 state_broadcast(&g_state, bcast, -1);
@@ -300,15 +306,14 @@ static void *client_handler(void *arg) {
                 send_all(client_fd, PROTO_EVENT_YOU_LOSE);
                 proto_sendf(client_fd, PROTO_EVENT_WINNER, winner);
                 send_all(client_fd, boardbuf);
+                send_all(client_fd, PROTO_EVENT_GAME_OVER_LOSE);
 
                 if (opp_fd != -1) {
                     send_all(opp_fd, PROTO_EVENT_YOU_WIN);
                     proto_sendf(opp_fd, PROTO_EVENT_WINNER, winner);
                     send_all(opp_fd, boardbuf);
+                    send_all(opp_fd, PROTO_EVENT_GAME_OVER_WIN);
                 }
-                /* Invita al rematch */
-                send_all(client_fd, PROTO_EVENT_GAME_OVER);
-                if (opp_fd != -1) send_all(opp_fd, PROTO_EVENT_GAME_OVER);
 
                 char bcast[64];
                 snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_FINISHED, mid);
@@ -323,54 +328,34 @@ static void *client_handler(void *arg) {
             }
 
         } else if (strcmp(p, "REMATCH") == 0) {
-            /* --------------------------------------------------------
-             * REMATCH: cerca la partita terminata in cui questo client
-             * era coinvolto (stato MATCH_REMATCH).
-             * -------------------------------------------------------- */
-            int mid = matches_find_rematch(&g_matches, client_fd);
-            if (mid == -1) {
+            /*
+             * REMATCH: cerca la partita terminata (MATCH_REMATCH) in cui
+             * questo client era coinvolto, e crea una nuova partita WAITING
+             * con lui come owner (X).
+             * Solo il vincitore (o entrambi in caso di pareggio) può farlo.
+             */
+            int old_mid = matches_find_rematch(&g_matches, client_fd);
+            if (old_mid == -1) {
                 send_all(client_fd, PROTO_ERR_REMATCH_NOT_AVAIL);
                 continue;
             }
 
-            int other_fd      = -1;
-            int new_mid       = -1;
-            int new_owner_fd  = -1;
-            int new_joiner_fd = -1;
+            int new_mid = matches_rematch(&g_matches, old_mid, client_fd);
 
-            int rc = matches_rematch(&g_matches, mid, client_fd,
-                                     &other_fd,
-                                     &new_mid, &new_owner_fd, &new_joiner_fd);
+            if (new_mid >= 1) {
+                /* Nuova partita creata: il richiedente è owner (X) */
+                proto_sendf(client_fd, PROTO_OK_REMATCH_CREATED, new_mid);
 
-            if (rc == 0) {
-                /* Primo a chiedere: aspetta l'avversario */
-                send_all(client_fd, PROTO_OK_REMATCH_WAITING);
-                if (other_fd != -1)
-                    proto_sendf(other_fd, PROTO_EVENT_REMATCH_OFFERED, me);
-
-            } else if (rc == 1) {
-                /* Entrambi pronti: nuova partita avviata */
-                state_set_playing_match(&g_state, new_owner_fd,  new_mid);
-                state_set_playing_match(&g_state, new_joiner_fd, new_mid);
-
-                char owner_name[MAX_NAME]  = "??";
-                char joiner_name[MAX_NAME] = "??";
-                state_get_name_copy(&g_state, new_owner_fd,  owner_name,  sizeof(owner_name));
-                state_get_name_copy(&g_state, new_joiner_fd, joiner_name, sizeof(joiner_name));
-
-                start_match_notify(new_mid,
-                    new_owner_fd,  owner_name,
-                    new_joiner_fd, joiner_name,
-                    PROTO_OK_REMATCH_STARTED_X,
-                    PROTO_OK_REMATCH_STARTED_O);
-
-                /* Broadcast: nuova partita disponibile */
+                /* Broadcast a tutti: nuova partita disponibile */
                 char bcast[128];
-                snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_STARTED_ALL, new_mid);
-                state_broadcast(&g_state, bcast, -1);
+                snprintf(bcast, sizeof(bcast), PROTO_EVENT_MATCH_AVAILABLE, new_mid, me);
+                state_broadcast(&g_state, bcast, client_fd);
 
-            } else if (rc == -3) {
-                send_all(client_fd, PROTO_OK_REMATCH_WAITING); /* già in attesa */
+            } else if (new_mid == -3) {
+                /* Perdente tenta il rematch */
+                send_all(client_fd, PROTO_ERR_REMATCH_DENIED);
+            } else if (new_mid == -4) {
+                send_all(client_fd, PROTO_ERR_MATCHES_FULL);
             } else {
                 send_all(client_fd, PROTO_ERR_REMATCH_FAILED);
             }

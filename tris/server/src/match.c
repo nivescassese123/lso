@@ -51,18 +51,29 @@ static void render_board(const match_t *m, char *out, int outsz) {
     );
 }
 
-/* Trova uno slot libero (id==0). Chiama sotto lock. */
 static match_t *find_free_slot(match_store_t *ms) {
     for (int i = 0; i < MAX_MATCHES; i++)
         if (ms->matches[i].id == 0) return &ms->matches[i];
     return NULL;
 }
 
-/* Trova match per id. Chiama sotto lock. */
 static match_t *find_match(match_store_t *ms, int match_id) {
     for (int i = 0; i < MAX_MATCHES; i++)
         if (ms->matches[i].id == match_id) return &ms->matches[i];
     return NULL;
+}
+
+static void match_reset(match_t *m) {
+    m->id        = 0;
+    m->status    = MATCH_FINISHED;
+    m->owner_fd  = -1;
+    m->joiner_fd = -1;
+    m->pending_fd= -1;
+    m->winner_fd = -1;
+    m->loser_fd  = -1;
+    m->draw      = 0;
+    m->turn      = 0;
+    board_clear(m->board);
 }
 
 /* ------------------------------------------------------------------ */
@@ -72,15 +83,8 @@ static match_t *find_match(match_store_t *ms, int match_id) {
 void matches_init(match_store_t *ms) {
     pthread_mutex_init(&ms->mtx, NULL);
     ms->next_id = 1;
-    memset(ms->matches, 0, sizeof(ms->matches));
-    for (int i = 0; i < MAX_MATCHES; i++) {
-        ms->matches[i].id                   = 0;
-        ms->matches[i].owner_fd             = -1;
-        ms->matches[i].joiner_fd            = -1;
-        ms->matches[i].pending_fd           = -1;
-        ms->matches[i].rematch_requester_fd = -1;
-        ms->matches[i].rematch_other_fd     = -1;
-    }
+    for (int i = 0; i < MAX_MATCHES; i++)
+        match_reset(&ms->matches[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -90,19 +94,13 @@ void matches_init(match_store_t *ms) {
 int matches_create(match_store_t *ms, int owner_fd) {
     pthread_mutex_lock(&ms->mtx);
     match_t *m = find_free_slot(ms);
-    if (!m) {
-        pthread_mutex_unlock(&ms->mtx);
-        return -1;
-    }
-    m->id                   = ms->next_id++;
-    m->status               = MATCH_WAITING;
-    m->owner_fd             = owner_fd;
-    m->joiner_fd            = -1;
-    m->pending_fd           = -1;
-    m->turn                 = 0;
-    m->rematch_requester_fd = -1;
-    m->rematch_other_fd     = -1;
-    board_clear(m->board);
+    if (!m) { pthread_mutex_unlock(&ms->mtx); return -1; }
+
+    match_reset(m);
+    m->id       = ms->next_id++;
+    m->status   = MATCH_WAITING;
+    m->owner_fd = owner_fd;
+
     int id = m->id;
     pthread_mutex_unlock(&ms->mtx);
     return id;
@@ -124,7 +122,6 @@ void matches_list(match_store_t *ms, server_state_t *st, char *out, int outsz) {
         if (m->id == 0) continue;
 
         char owner_name[MAX_NAME] = "??";
-        /* Ordine lock: ms->mtx → st->mtx (rispettato ovunque) */
         state_get_name_copy(st, m->owner_fd, owner_name, sizeof(owner_name));
 
         const char *ss;
@@ -133,7 +130,7 @@ void matches_list(match_store_t *ms, server_state_t *st, char *out, int outsz) {
             case MATCH_PENDING:  ss = "PENDING";  break;
             case MATCH_PLAYING:  ss = "PLAYING";  break;
             case MATCH_FINISHED: ss = "FINISHED"; break;
-            case MATCH_REMATCH:  ss = "REMATCH";  break;
+            case MATCH_REMATCH:  ss = "FINISHED"; break; /* dall'esterno è finita */
             default:             ss = "UNKNOWN";  break;
         }
 
@@ -224,24 +221,24 @@ int matches_move(match_store_t *ms, server_state_t *st,
     if (r < 0 || r > 2 || c < 0 || c > 2) { pthread_mutex_unlock(&ms->mtx); return -5; }
     if (m->board[r][c] != ' ') { pthread_mutex_unlock(&ms->mtx); return -5; }
 
-    char mark = is_owner ? 'X' : 'O';
+    char mark        = is_owner ? 'X' : 'O';
     m->board[r][c]   = mark;
     *opponent_fd_out = is_owner ? m->joiner_fd : m->owner_fd;
 
     int result = 0;
     if (check_winner(m->board, mark)) {
-        /* Passa a REMATCH invece di liberare lo slot subito:
-           i giocatori possono ancora chiedere il rematch.          */
-        m->status               = MATCH_REMATCH;
-        m->rematch_requester_fd = -1;
-        m->rematch_other_fd     = -1;
+        m->winner_fd = player_fd;
+        m->loser_fd  = *opponent_fd_out;
+        m->draw      = 0;
+        m->status    = MATCH_REMATCH;
         if (winner_name_out)
             state_get_name_copy(st, player_fd, winner_name_out, winner_name_sz);
         result = 1;
     } else if (board_full(m->board)) {
-        m->status               = MATCH_REMATCH;
-        m->rematch_requester_fd = -1;
-        m->rematch_other_fd     = -1;
+        m->winner_fd = -1;
+        m->loser_fd  = -1;
+        m->draw      = 1;
+        m->status    = MATCH_REMATCH;
         result = 2;
     } else {
         m->turn = 1 - m->turn;
@@ -286,10 +283,12 @@ int matches_resign(match_store_t *ms, server_state_t *st,
     int opp_fd = is_owner ? m->joiner_fd : m->owner_fd;
     if (opp_fd == -1) { pthread_mutex_unlock(&ms->mtx); return -4; }
 
-    *opponent_fd_out        = opp_fd;
-    m->status               = MATCH_REMATCH;
-    m->rematch_requester_fd = -1;
-    m->rematch_other_fd     = -1;
+    /* Chi fa resign perde */
+    m->winner_fd     = opp_fd;
+    m->loser_fd      = player_fd;
+    m->draw          = 0;
+    *opponent_fd_out = opp_fd;
+    m->status        = MATCH_REMATCH;
 
     if (winner_name_out)
         state_get_name_copy(st, opp_fd, winner_name_out, winner_name_sz);
@@ -301,6 +300,13 @@ int matches_resign(match_store_t *ms, server_state_t *st,
 
 /* ------------------------------------------------------------------ */
 /*  REMATCH                                                             */
+/*                                                                      */
+/*  Logica:                                                             */
+/*   - Solo il vincitore (o entrambi in caso di pareggio) può fare     */
+/*     REMATCH.                                                         */
+/*   - Il REMATCH crea una NUOVA partita in WAITING con il richiedente  */
+/*     come owner (X). Il vecchio slot viene liberato.                  */
+/*   - Broadcast a tutti: chiunque può joinare la nuova partita.        */
 /* ------------------------------------------------------------------ */
 
 int matches_find_rematch(match_store_t *ms, int player_fd) {
@@ -308,8 +314,7 @@ int matches_find_rematch(match_store_t *ms, int player_fd) {
     int found_id = -1;
     for (int i = 0; i < MAX_MATCHES; i++) {
         match_t *m = &ms->matches[i];
-        if (m->id == 0) continue;
-        if (m->status != MATCH_REMATCH) continue;
+        if (m->id == 0 || m->status != MATCH_REMATCH) continue;
         if (m->owner_fd == player_fd || m->joiner_fd == player_fd) {
             found_id = m->id;
             break;
@@ -321,20 +326,13 @@ int matches_find_rematch(match_store_t *ms, int player_fd) {
 
 /*
  * matches_rematch:
- *
- *   Ritorna 0: richiesta registrata, aspetta l'avversario.
- *              *other_fd_out = fd avversario da notificare.
- *   Ritorna 1: entrambi pronti → nuova partita creata.
- *              *new_match_id_out, *new_owner_fd_out, *new_joiner_fd_out valorizzati.
- *   Ritorna -1: match non trovato o non in REMATCH.
- *   Ritorna -2: non sei un giocatore.
- *   Ritorna -3: hai già chiesto il rematch.
+ *  Ritorna new_match_id (>= 1) se la nuova partita è stata creata.
+ *  Ritorna -1 match non trovato / non in REMATCH
+ *  Ritorna -2 non sei un giocatore
+ *  Ritorna -3 sei il perdente
+ *  Ritorna -4 nessuno slot libero
  */
-int matches_rematch(match_store_t *ms, int match_id, int player_fd,
-                    int *other_fd_out,
-                    int *new_match_id_out,
-                    int *new_owner_fd_out,
-                    int *new_joiner_fd_out) {
+int matches_rematch(match_store_t *ms, int match_id, int player_fd) {
     pthread_mutex_lock(&ms->mtx);
 
     match_t *m = find_match(ms, match_id);
@@ -350,53 +348,31 @@ int matches_rematch(match_store_t *ms, int match_id, int player_fd,
         return -2;
     }
 
-    /* Ha già chiesto? */
-    if (m->rematch_requester_fd == player_fd) {
+    
+    if (!m->draw && m->loser_fd == player_fd) {
         pthread_mutex_unlock(&ms->mtx);
         return -3;
     }
 
-    if (m->rematch_requester_fd == -1) {
-        /* Primo a chiedere: registra e notifica l'avversario */
-        m->rematch_requester_fd = player_fd;
-        m->rematch_other_fd     = is_owner ? m->joiner_fd : m->owner_fd;
-        *other_fd_out           = m->rematch_other_fd;
-        pthread_mutex_unlock(&ms->mtx);
-        return 0;
-    }
-
-    /* Secondo a chiedere: entrambi pronti → crea nuova partita */
-    int first_fd  = m->rematch_requester_fd;  /* chi ha chiesto per primo → X */
-    int second_fd = player_fd;                 /* chi ha appena accettato  → O */
-
-    /* Trova slot libero per la nuova partita */
+   
     match_t *nm = find_free_slot(ms);
     if (!nm) {
         pthread_mutex_unlock(&ms->mtx);
-        return -1;  /* nessuno slot libero */
+        return -4;
     }
 
-    int new_id               = ms->next_id++;
-    nm->id                   = new_id;
-    nm->status               = MATCH_PLAYING;
-    nm->owner_fd             = first_fd;   /* chi ha chiesto per primo è X */
-    nm->joiner_fd            = second_fd;
-    nm->pending_fd           = -1;
-    nm->turn                 = 0;
-    nm->rematch_requester_fd = -1;
-    nm->rematch_other_fd     = -1;
-    board_clear(nm->board);
+    
+    int new_id  = ms->next_id++;
+    match_reset(nm);
+    nm->id       = new_id;
+    nm->status   = MATCH_WAITING;
+    nm->owner_fd = player_fd;   
 
-    /* Libera il vecchio slot */
-    m->status = MATCH_FINISHED;
-    m->id     = 0;
-
-    *new_match_id_out  = new_id;
-    *new_owner_fd_out  = first_fd;
-    *new_joiner_fd_out = second_fd;
+    
+    match_reset(m);
 
     pthread_mutex_unlock(&ms->mtx);
-    return 1;
+    return new_id;
 }
 
 /* ------------------------------------------------------------------ */
@@ -404,9 +380,8 @@ int matches_rematch(match_store_t *ms, int match_id, int player_fd,
 /* ------------------------------------------------------------------ */
 
 void matches_on_disconnect(match_store_t *ms, server_state_t *st, int fd) {
-    int notify_opp_fd  = -1;   /* avversario da notificare (YOU_WIN) */
-    int notify_pend_fd = -1;   /* pending joiner da notificare       */
-    int notify_rematch_fd = -1; /* aspettava rematch, avversario sparito */
+    int notify_opp_fd  = -1;
+    int notify_pend_fd = -1;
 
     pthread_mutex_lock(&ms->mtx);
 
@@ -414,36 +389,31 @@ void matches_on_disconnect(match_store_t *ms, server_state_t *st, int fd) {
         match_t *m = &ms->matches[i];
         if (m->id == 0) continue;
 
-        /* --- In partita in corso --- */
+        
         if (m->status == MATCH_PLAYING &&
             (m->owner_fd == fd || m->joiner_fd == fd)) {
             notify_opp_fd = (m->owner_fd == fd) ? m->joiner_fd : m->owner_fd;
-            m->status     = MATCH_FINISHED;
-            m->id         = 0;
+            match_reset(m);
             continue;
         }
 
-        /* --- In fase REMATCH --- */
+        
         if (m->status == MATCH_REMATCH &&
             (m->owner_fd == fd || m->joiner_fd == fd)) {
-            notify_rematch_fd = (m->owner_fd == fd) ? m->joiner_fd : m->owner_fd;
-            m->status         = MATCH_FINISHED;
-            m->id             = 0;
+            match_reset(m);
             continue;
         }
 
-        /* --- Owner di partita non iniziata --- */
+        
         if ((m->status == MATCH_WAITING || m->status == MATCH_PENDING)
              && m->owner_fd == fd) {
             if (m->status == MATCH_PENDING && m->pending_fd != -1)
                 notify_pend_fd = m->pending_fd;
-            m->status     = MATCH_FINISHED;
-            m->pending_fd = -1;
-            m->id         = 0;
+            match_reset(m);
             continue;
         }
 
-        /* --- Pending joiner che si disconnette --- */
+       
         if (m->status == MATCH_PENDING && m->pending_fd == fd) {
             m->pending_fd = -1;
             m->status     = MATCH_WAITING;
@@ -452,7 +422,6 @@ void matches_on_disconnect(match_store_t *ms, server_state_t *st, int fd) {
 
     pthread_mutex_unlock(&ms->mtx);
 
-    /* --- Azioni fuori dal lock --- */
     if (notify_opp_fd != -1) {
         char winner_name[MAX_NAME] = "??";
         state_get_name_copy(st, notify_opp_fd, winner_name, sizeof(winner_name));
@@ -463,12 +432,9 @@ void matches_on_disconnect(match_store_t *ms, server_state_t *st, int fd) {
                  PROTO_EVENT_WINNER,
                  winner_name);
         send_all(notify_opp_fd, msg);
+        send_all(notify_opp_fd, PROTO_EVENT_GAME_OVER_WIN);
         state_clear_playing_match(st, notify_opp_fd);
     }
-
-    /* Se l'avversario era in attesa di rematch lo notifichiamo */
-    if (notify_rematch_fd != -1)
-        send_all(notify_rematch_fd, PROTO_EVENT_REMATCH_DECLINED);
 
     state_clear_playing_match(st, fd);
 

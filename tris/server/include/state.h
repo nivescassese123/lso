@@ -10,7 +10,7 @@ typedef struct {
     int  fd;
     int  logged_in;
     char name[MAX_NAME];
-    int  playing_match_id;   /* -1 se non sta giocando */
+    int  playing_match_id;
 } client_t;
 
 typedef struct {
@@ -32,10 +32,6 @@ int         state_get_playing_match(server_state_t *st, int fd);
 int         state_set_playing_match(server_state_t *st, int fd, int mid);
 int         state_clear_playing_match(server_state_t *st, int fd);
 
-/*
- * Invia msg a tutti i client loggati, escludendo exclude_fd.
- * Passa -1 come exclude_fd per non escludere nessuno.
- */
 void        state_broadcast(server_state_t *st, const char *msg, int exclude_fd);
 
-#endif /* STATE_H */
+#endif 

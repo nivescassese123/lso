@@ -12,4 +12,4 @@ int  net_pop_line(char *buf, size_t *len, char *line_out, size_t line_cap);
 void send_all(int fd, const char *msg);
 int  recv_line(int fd, char *buf, size_t bufsz);
 
-#endif /* NET_H */
+#endif 

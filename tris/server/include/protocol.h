@@ -11,7 +11,7 @@
 #define PROTO_WELCOME           "WELCOME\n"
 #define PROTO_HINT_LOGIN        "Please LOGIN <n>\n"
 #define PROTO_HINT_CMDS         "Commands: LOGIN <n>, WHOAMI, USERS, CREATE, LIST, " \
-                                "JOIN <id>, ACCEPT <id>, REJECT <id>, "                 \
+                                "JOIN <id>, ACCEPT <id>, REJECT <id>, "                \
                                 "MOVE <r> <c>, BOARD, RESIGN, REMATCH, QUIT\n"
 
 /* ------------------------------------------------------------------ */
@@ -50,20 +50,16 @@
 #define PROTO_EVENT_JOIN_REQUEST      "EVENT JOIN_REQUEST %d %s\n"
 
 /* ------------------------------------------------------------------ */
-/*  ACCEPT                                                              */
+/*  ACCEPT / REJECT                                                     */
 /* ------------------------------------------------------------------ */
 #define PROTO_OK_MATCH_STARTED_X  "OK MATCH_STARTED %d vs %s (YOU=X)\n"
 #define PROTO_OK_MATCH_STARTED_O  "OK MATCH_STARTED %d vs %s (YOU=O)\n"
 #define PROTO_ERR_NOT_OWNER       "ERR NOT_OWNER\n"
 #define PROTO_ERR_NO_PENDING      "ERR NO_PENDING_REQUEST\n"
 #define PROTO_ERR_ACCEPT_FAILED   "ERR ACCEPT_FAILED\n"
-
-/* ------------------------------------------------------------------ */
-/*  REJECT                                                              */
-/* ------------------------------------------------------------------ */
-#define PROTO_OK_REJECTED       "OK REJECTED\n"
-#define PROTO_ERR_REJECT_FAILED "ERR REJECT_FAILED\n"
-#define PROTO_ERR_JOIN_REJECTED "ERR JOIN_REJECTED\n"
+#define PROTO_OK_REJECTED         "OK REJECTED\n"
+#define PROTO_ERR_REJECT_FAILED   "ERR REJECT_FAILED\n"
+#define PROTO_ERR_JOIN_REJECTED   "ERR JOIN_REJECTED\n"
 
 /* ------------------------------------------------------------------ */
 /*  MOVE                                                                */
@@ -83,8 +79,14 @@
 #define PROTO_EVENT_YOU_LOSE  "EVENT YOU_LOSE\n"
 #define PROTO_EVENT_DRAW      "EVENT DRAW\n"
 #define PROTO_EVENT_WINNER    "EVENT WINNER %s\n"
-/* Inviato a entrambi dopo la fine: invita al rematch */
-#define PROTO_EVENT_GAME_OVER "EVENT GAME_OVER Digita REMATCH per rigiocare, QUIT per uscire\n"
+/*
+ * Inviato al termine della partita:
+ * - al vincitore (o a entrambi in caso di pareggio): può fare REMATCH
+ * - al perdente: può solo fare CREATE/JOIN su altre partite
+ */
+#define PROTO_EVENT_GAME_OVER_WIN   "EVENT GAME_OVER Hai vinto! Digita REMATCH per aprire una nuova partita, QUIT per uscire\n"
+#define PROTO_EVENT_GAME_OVER_LOSE  "EVENT GAME_OVER Hai perso. Digita CREATE o JOIN per una nuova partita, QUIT per uscire\n"
+#define PROTO_EVENT_GAME_OVER_DRAW  "EVENT GAME_OVER Pareggio! Digita REMATCH per aprire una nuova partita, QUIT per uscire\n"
 
 /* ------------------------------------------------------------------ */
 /*  RESIGN                                                              */
@@ -100,22 +102,18 @@
 /* ------------------------------------------------------------------ */
 /*  REMATCH                                                             */
 /*                                                                      */
-/*  Flusso:                                                             */
-/*   1. Giocatore A manda REMATCH                                       */
-/*      → A riceve OK_REMATCH_WAITING                                   */
-/*      → B riceve EVENT_REMATCH_OFFERED                                */
-/*   2a. B manda REMATCH                                                */
-/*      → entrambi ricevono OK_REMATCH_STARTED (nuova partita)          */
-/*   2b. B non risponde / si disconnette                                 */
-/*      → A riceve EVENT_REMATCH_DECLINED                               */
+/*  Logica conforme alla traccia:                                       */
+/*   - Vincitore fa REMATCH → crea partita WAITING come owner (X)      */
+/*     Broadcast a tutti → chiunque può fare JOIN                       */
+/*   - Pareggio → entrambi possono fare REMATCH (stesso comportamento)  */
+/*   - Perdente → ERR_REMATCH_DENIED, può solo CREATE/JOIN              */
 /* ------------------------------------------------------------------ */
-#define PROTO_EVENT_REMATCH_OFFERED  "EVENT REMATCH_OFFERED %s vuole rigiocare (digita REMATCH per accettare)\n"
-#define PROTO_OK_REMATCH_WAITING     "OK REMATCH_WAITING Attendi che l'avversario accetti...\n"
-#define PROTO_OK_REMATCH_STARTED_X   "OK REMATCH_STARTED %d vs %s (YOU=X)\n"
-#define PROTO_OK_REMATCH_STARTED_O   "OK REMATCH_STARTED %d vs %s (YOU=O)\n"
-#define PROTO_EVENT_REMATCH_DECLINED "EVENT REMATCH_DECLINED L'avversario non vuole rigiocare\n"
-#define PROTO_ERR_REMATCH_NOT_AVAIL  "ERR REMATCH_NOT_AVAILABLE\n"
-#define PROTO_ERR_REMATCH_FAILED     "ERR REMATCH_FAILED\n"
+/* Conferma al vincitore/pareggiante: nuova partita creata */
+#define PROTO_OK_REMATCH_CREATED   "OK REMATCH_CREATED %d Sei owner (X), attendi un avversario\n"
+/* Errori */
+#define PROTO_ERR_REMATCH_DENIED   "ERR REMATCH_DENIED Hai perso, non puoi richiedere la rivincita. Usa CREATE o JOIN\n"
+#define PROTO_ERR_REMATCH_FAILED   "ERR REMATCH_FAILED\n"
+#define PROTO_ERR_REMATCH_NOT_AVAIL "ERR REMATCH_NOT_AVAILABLE Non sei in una partita terminata\n"
 
 /* ------------------------------------------------------------------ */
 /*  Disconnect / eventi asincroni                                       */
@@ -135,4 +133,4 @@
 /* ------------------------------------------------------------------ */
 void proto_sendf(int fd, const char *fmt, ...);
 
-#endif /* PROTOCOL_H */
+#endif 
